@@ -66,6 +66,8 @@ jobs:
           (evidence / 'build-environment.json').write_text(json.dumps(versions, indent=2))
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write(f'BUILD_PYTHON={python}\nWHEEL_NOT_BEFORE={time.time()}\n')
+              if sys.platform == 'darwin':
+                  env.write('MACOSX_DEPLOYMENT_TARGET=14.0\n_PYTHON_HOST_PLATFORM=macosx-14.0-arm64\n')
           with open(os.environ['GITHUB_PATH'], 'a') as paths:
               paths.write(str(python.parent) + '\n')
       - name: Build targeted CPU wheel and custom fixture, then test installed wheel
