@@ -1,0 +1,90 @@
+name: Python 3.15 CPU fork rehearsal
+
+on:
+  push:
+    branches: ['rehearsal/python315-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-wheel:
+    if: github.repository == 'dannyota/onnxruntime'
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.14', '3.15']
+        platform:
+          - runner: ubuntu-24.04
+            arch: x64
+            requirements: tools/ci_build/github/linux/python/requirements.txt
+          - runner: windows-2022
+            arch: x64
+            requirements: tools/ci_build/github/windows/python/requirements.txt
+          - runner: macos-15
+            arch: arm64
+            requirements: tools/ci_build/github/linux/docker/scripts/requirements.txt
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 180
+    env:
+      LEG: ${{ matrix.platform.runner }}-cp${{ matrix.python }}
+      REQUIREMENTS: ${{ matrix.platform.requirements }}
+      EXPECTED_PYTHON: ${{ matrix.python }}
+      EXPECTED_ARCH: ${{ matrix.platform.arch }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.platform.arch }}
+      - name: Create build environment and install public dependencies
+        shell: python
+        run: |
+          import json, os, pathlib, platform, subprocess, sys, time, venv
+          expected = tuple(int(part) for part in os.environ['EXPECTED_PYTHON'].split('.'))
+          if sys.version_info[:2] != expected:
+              raise RuntimeError(f'Expected Python {expected}, got {sys.version_info[:2]}')
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          evidence = root / 'rehearsal-evidence' / os.environ['LEG']
+          evidence.mkdir(parents=True)
+          environment = root / '.rehearsal-venvs' / os.environ['LEG']
+          venv.EnvBuilder(with_pip=True).create(environment)
+          python = environment / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          command = [str(python), '-m', 'pip', 'install', '-r', os.environ['REQUIREMENTS'],
+                     '-r', 'requirements-materialize-onnx-node-tests.txt',
+                     'setuptools==78.1.1', 'wheel==0.45.1', 'cmake==3.31.10', 'ninja']
+          with (evidence / 'build-install.log').open('w') as log:
+              subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
+          with (evidence / 'build-dependencies.txt').open('w') as log:
+              subprocess.run([str(python), '-m', 'pip', 'freeze'], stdout=log, check=True)
+          versions = {'python': sys.version, 'executable': sys.executable,
+                      'architecture': platform.machine(), 'platform': platform.platform(),
+                      'source_commit': os.environ['GITHUB_SHA'], 'native_linux_wheel': sys.platform == 'linux'}
+          (evidence / 'build-environment.json').write_text(json.dumps(versions, indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'BUILD_PYTHON={python}\nWHEEL_NOT_BEFORE={time.time()}\n')
+          with open(os.environ['GITHUB_PATH'], 'a') as paths:
+              paths.write(str(python.parent) + '\n')
+      - name: Build targeted CPU wheel and custom fixture, then test installed wheel
+        shell: python
+        run: |
+          import os, pathlib, subprocess
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          subprocess.run([
+              os.environ['BUILD_PYTHON'], 'tools/ci_build/python315_cpu_rehearsal.py',
+              '--source', str(root), '--source-commit', os.environ['GITHUB_SHA'],
+              '--build-dir', str(root / 'rehearsal-build' / os.environ['LEG']),
+              '--evidence', str(root / 'rehearsal-evidence' / os.environ['LEG']),
+              '--arch', os.environ['EXPECTED_ARCH'], '--not-before', os.environ['WHEEL_NOT_BEFORE'], '--build',
+          ], check=True)
+      - name: Upload native rehearsal artifacts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-rehearsal-${{ matrix.platform.runner }}-cp${{ matrix.python }}
+          path: rehearsal-evidence/${{ env.LEG }}/
+          if-no-files-found: error
+          retention-days: 30
